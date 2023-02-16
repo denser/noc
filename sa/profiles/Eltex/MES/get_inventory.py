@@ -137,7 +137,6 @@ class Script(BaseScript):
         return {"type": "PWR", "vendor": "ELTEX", "part_no": part_no, "number": type}
 
     def get_trans(self, ifname):
-        v = ""
         if self.has_detail:
             try:
                 v = self.cli("show fiber-ports optical-transceiver detailed interface %s" % ifname)
@@ -217,7 +216,11 @@ class Script(BaseScript):
                         raise self.NotSupportedError()
                 if not self.is_has_image:
                     if has_unit_command:
-                        ver = self.cli(f"show version unit {unit}", cached=True)
+                        try:
+                            ver = self.cli(f"show version unit {unit}", cached=True)
+                        except self.CLISyntaxError:
+                            if unit == "1":
+                                ver = self.cli("show version", cached=True)
                     else:
                         ver = self.cli("show version", cached=True)
                 else:
