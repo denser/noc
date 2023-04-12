@@ -1,7 +1,7 @@
 # ----------------------------------------------------------------------
 # @diagnostic decorator
 # ----------------------------------------------------------------------
-# Copyright (C) 2007-2022 The NOC Project
+# Copyright (C) 2007-2023 The NOC Project
 # See LICENSE for details
 # ----------------------------------------------------------------------
 
@@ -11,7 +11,8 @@ import datetime
 import logging
 from dataclasses import dataclass
 from collections import defaultdict
-from typing import Optional, List, Dict, Any, Set, Iterable
+from itertools import product
+from typing import Optional, List, Dict, Any, Iterable
 
 # Third-party modules
 import orjson
@@ -46,6 +47,14 @@ SYSLOG_DIAG = "SYSLOG"
 SNMPTRAP_DIAG = "SNMPTRAP"
 #
 DIAGNOCSTIC_LABEL_SCOPE = "diag"
+
+
+def json_default(obj):
+    if isinstance(obj, BaseModel):
+        return obj.dict()
+    elif isinstance(obj, datetime.datetime):
+        return obj.replace(microsecond=0).isoformat(sep=" ")
+    raise TypeError
 
 
 class DiagnosticEvent(str, enum.Enum):
@@ -301,6 +310,10 @@ class DiagnosticHub(object):
         * reset alarm
         * update data in
         """
+        for d in diagnostics:
+            if d in self:
+                del self.__diagnostics[d]
+        self.sync_diagnostics()
 
     def sync_diagnostics(self):
         """
@@ -330,6 +343,68 @@ class DiagnosticHub(object):
             self.__object.diagnostics[d_name] = d_new.dict()
         if changed:
             self.sync_alarms(list(changed))
+
+    def sync_with_object(
+        self,
+        update: Optional[List[DiagnosticItem]],
+        remove: Optional[List[str]] = None,
+        sync_labels: bool = True,
+    ):
+        """
+        Sync diagnostics state with object
+        """
+        from django.db import connection as pg_connection
+
+        # from noc.main.models.label import Label
+
+        if self.dry_run:
+            return
+        if is_document(self.__object):
+            return
+        states = [s.value for s in DiagnosticState]
+        if not update and not remove:
+            return
+        oid = self.__object.id
+        with pg_connection.cursor() as cursor:
+            removed_labels, add_labels = [], []
+            if update:
+                logger.debug("[%s] Saving changes", list(update))
+                diags = {}
+                for d in update:
+                    diags[d.diagnostic] = d
+                    add_labels.append(f"{DIAGNOCSTIC_LABEL_SCOPE}::{d.diagnostic}::{d.state}")
+                    removed_labels += [
+                        f"{DIAGNOCSTIC_LABEL_SCOPE}::{dn}::{s}"
+                        for dn, s in product([d.diagnostic], states)
+                        if s != d.state
+                    ]
+                cursor.execute(
+                    """
+                     UPDATE sa_managedobject
+                     SET diagnostics = diagnostics || %s::jsonb
+                     WHERE id = %s""",
+                    [orjson.dumps(diags, default=json_default).decode("utf-8"), oid],
+                )
+            if remove:
+                logger.debug("[%s] Removed diagnostics", list(remove))
+                removed_labels += [
+                    f"{DIAGNOCSTIC_LABEL_SCOPE}::{d}::{s}" for d, s in product(remove, states)
+                ]
+                cursor.execute(
+                    f"""
+                     UPDATE sa_managedobject
+                     SET diagnostics = diagnostics {" #- %s " * len(remove)}
+                     WHERE id = %s""",
+                    ["{%s}" % r for r in remove] + [oid],
+                )
+            # if sync_labels and (add_labels or removed_labels):
+            #     Label._change_model_labels(
+            #         "sa.ManagedObject",
+            #         add_labels=add_labels or None,
+            #         remove_labels=removed_labels or None,
+            #         instance_filters=[("id", oid)],
+            #     )
+        self.__object._reset_caches(oid)
 
     def sync_alarms(self, diagnostics: Optional[List[str]] = None):
         """

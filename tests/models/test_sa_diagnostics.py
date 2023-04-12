@@ -63,7 +63,9 @@ def test_set_state():
     assert o.diagnostic.D1.state == DiagnosticState.enabled
     o.diagnostic.update_checks([CheckData(name="SNMPv1", status=False)])
     assert o.diagnostic.SNMP.state == DiagnosticState.failed
-    o.diagnostic.update_checks([CheckData(name="SNMPv1", status=False), CheckData(name="SNMPv1", status=True)])
+    o.diagnostic.update_checks(
+        [CheckData(name="SNMPv1", status=False), CheckData(name="SNMPv1", status=True)]
+    )
     assert o.diagnostic.SNMP.state == DiagnosticState.enabled
     assert o.diagnostic.Access.state == DiagnosticState.enabled
     assert o.diagnostics["Access"]["state"] == "enabled"
