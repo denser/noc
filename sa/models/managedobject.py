@@ -48,8 +48,8 @@ from noc.config import config
 from noc.core.wf.diagnostic import (
     DiagnosticState,
     DiagnosticConfig,
+    diagnostic,
     DIAGNOCSTIC_LABEL_SCOPE,
-    DIAGNOSTIC_CHECK_STATE,
     PROFILE_DIAG,
     SNMP_DIAG,
     CLI_DIAG,
@@ -60,7 +60,7 @@ from noc.core.wf.diagnostic import (
     ALARM_DIAG,
 )
 from noc.core.wf.interaction import Interaction
-from noc.core.checkers.base import CheckData, Check
+from noc.core.checkers.base import Check
 from noc.core.mx import send_message, MX_LABELS, MX_H_VALUE_SPLITTER, MX_ADMINISTRATIVE_DOMAIN_ID
 from noc.core.deprecations import RemovedInNOC2301Warning
 from noc.aaa.models.user import User
@@ -130,7 +130,6 @@ from noc.core.topology.types import (
 from noc.core.models.problem import ProblemItem
 from noc.core.models.cfgmetrics import MetricCollectorConfig, MetricItem
 from noc.core.wf.decorator import workflow
-from noc.core.wf.diagnostic import diagnostic
 from noc.wf.models.state import State
 from .administrativedomain import AdministrativeDomain
 from .authprofile import AuthProfile

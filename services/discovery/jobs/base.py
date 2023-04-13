@@ -345,7 +345,6 @@ class MODiscoveryJob(PeriodicJob):
             is_box=self.is_box, is_periodic=self.is_periodic
         )
         self.logger.info("Updating diagnostics statuses")
-        bulk = []
         now = datetime.datetime.now()
         processed = set()
         # Processed failed diagnostics
