@@ -192,7 +192,7 @@ class DiagnosticHub(object):
     def __getattr__(self, name: str, default: Optional[Any] = None) -> Optional["DiagnosticItem"]:
         v = self.get(name)
         if v is None:
-            raise AttributeError(f"Unknown diagnostic")
+            raise AttributeError(f"Unknown diagnostic {name}")
         return v
 
     def __contains__(self, name: str) -> bool:
@@ -458,6 +458,7 @@ class DiagnosticHub(object):
         :return:
         """
         from noc.core.service.loader import get_service
+
         if not self.sync_alarm:
             self.logger.debug("Synchronize alarm is disabled")
             return
