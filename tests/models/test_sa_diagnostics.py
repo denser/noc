@@ -105,7 +105,7 @@ def test_bulk_set_state():
         "D2": {"diagnostic": "D2", "state": "failed", "reason": "1"},
         "Access": {"diagnostic": "Access", "state": "failed", "reason": "2"},
     }
-    with DiagnosticHub(o) as d:
+    with DiagnosticHub(o, dry_run=True) as d:
         assert d.D2.state == DiagnosticState.failed
         d.set_state("D1", DiagnosticState.enabled)
         assert d.D1.state == DiagnosticState.enabled
