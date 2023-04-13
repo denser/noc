@@ -164,7 +164,7 @@ class DiagnosticHub(object):
 
     """
 
-    def __init__(self, o: Any):
+    def __init__(self, o: Any, dry_run: bool = False, sync_alarm: bool = True):
         self.logger = logging.getLogger(__name__)
         self.__diagnostics: Optional[Dict[str, DiagnosticItem]] = None
         self.__checks: Dict[Check, List[str]] = defaultdict(list)
@@ -172,10 +172,12 @@ class DiagnosticHub(object):
         if not hasattr(o, "diagnostics"):
             raise NotImplementedError("Diagnostic Interface not supported")
         self.__object = o
-        self.dry_run: bool = True  # For test do not DB Sync
+        self.dry_run: bool = dry_run  # For test do not DB Sync
+        self.sync_alarm = sync_alarm
+        self.bulk_mode: bool = False
         # diagnostic state
 
-    def get(self, name: str) -> Optional[Any]:
+    def get(self, name: str) -> Optional[DiagnosticItem]:
         if self.__diagnostics is None:
             self.__diagnostics = self.__load_diagnostics()
         if name in self.__diagnostics:
@@ -196,26 +198,51 @@ class DiagnosticHub(object):
     def __contains__(self, name: str) -> bool:
         return self.get(name) is not None
 
+    def __enter__(self):
+        """
+        Bulk mode. Sync diagnostic after exit from context
+        """
+        self.bulk_mode = True
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.bulk_mode = False
+        self.sync_diagnostics()
+
+    def __iter__(self) -> Iterable[DiagnosticItem]:
+        if self.__diagnostics is None:
+            self.__diagnostics = self.__load_diagnostics()
+        for d in self.__diagnostics.values():
+            yield d
+
     def get_object_diagnostic(self, name: str) -> Optional[DiagnosticItem]:
-        """ """
+        """
+        Get DiagnosticItem from Object
+        :param name: Diagnostic Name
+        """
         if name in self.__object.diagnostics:
             return DiagnosticItem(**self.__object.diagnostics[name])
         return DiagnosticItem(diagnostic=name)
 
     def iter_diagnostic_configs(self) -> Iterable[DiagnosticConfig]:
-        for dc in self.__object.iter_diagnostic_configs():
-            yield dc
+        for d in self:
+            yield d.config
 
     def __load_diagnostics(self) -> Dict[str, DiagnosticItem]:
+        """
+        Loading Diagnostic from Object
+        """
         r = {}
         if is_document(self.__object):
             return r
-        for dc in self.iter_diagnostic_configs():
+        for dc in self.__object.iter_diagnostic_configs():
             # if dc.diagnostic in self.__object.diagnostics:
             #     r[dc.diagnostic] = self.__object.diagnostics[dc.diagnostic]
             item = self.__object.diagnostics.get(dc.diagnostic) or {}
             if not item:
                 item = {"diagnostic": dc.diagnostic}
+            if dc.blocked:
+                item["state"] = "blocked"
             item["config"] = dc
             r[dc.diagnostic] = DiagnosticItem(**item)
             for c in dc.checks or []:
@@ -245,9 +272,9 @@ class DiagnosticHub(object):
         """
         d = self[diagnostic]
         if d.state.is_blocked or d.state == state:
-            logger.debug("[%s] State is same", d.diagnostic)
+            self.logger.debug("[%s] State is same", d.diagnostic)
             return
-        logger.info(
+        self.logger.info(
             "[%s] Change diagnostic state: %s -> %s", diagnostic, d.state.value, state.value
         )
         # last_state = d.state
@@ -257,7 +284,7 @@ class DiagnosticHub(object):
         # Update dependent
         if d.diagnostic not in self.__depended:
             return
-        logger.debug("[%s] Update depended diagnostic", d.diagnostic)
+        self.logger.debug("[%s] Update depended diagnostic", d.diagnostic)
         d = self[self.__depended[d.diagnostic]]
         states = []
         for dd in d.config.dependent:
@@ -304,6 +331,13 @@ class DiagnosticHub(object):
             )
             self.set_state(d, DIAGNOSTIC_CHECK_STATE[c_state], changed_ts=now)
 
+    def refresh_diagnostics(self):
+        """
+        Reload diagnostic config and sync
+        """
+        self.__diagnostics = None
+        self.sync_diagnostics()
+
     def reset_diagnostics(self, diagnostics: List[str]):
         """
         Remove diagnostic data.
@@ -324,15 +358,21 @@ class DiagnosticHub(object):
         * save database
         * clear cache
         """
-        changed = set()
-        for d_name, d_new in self.__diagnostics.items():
+        if self.bulk_mode:
+            self.logger.debug("Bulk mode. Sync blocked")
+            return
+        changed_state = set()
+        changed = []
+        for d_new in self:
+            d_name = d_new.diagnostic
             d_current = self.get_object_diagnostic(d_name)
+            # Diff
             if d_current == d_new:
-                logger.info("[%s] Diagnostic Same, next.", d_name)
+                self.logger.info("[%s] Diagnostic Same, next.", d_name)
                 continue
-            logger.info("[%s] Update object diagnostic", d_name)
+            self.logger.info("[%s] Update object diagnostic", d_name)
             if d_current.state != d_new.state:
-                changed.add(d_name)
+                changed_state.add(d_name)
                 self.register_diagnostic_change(
                     d_name,
                     state=d_new.state,
@@ -341,8 +381,11 @@ class DiagnosticHub(object):
                     ts=d_new.changed,
                 )
             self.__object.diagnostics[d_name] = d_new.dict()
+            changed += [d_new]
+        if changed_state:
+            self.sync_alarms(list(changed_state))
         if changed:
-            self.sync_alarms(list(changed))
+            self.sync_with_object(changed)
 
     def sync_with_object(
         self,
@@ -368,7 +411,7 @@ class DiagnosticHub(object):
         with pg_connection.cursor() as cursor:
             removed_labels, add_labels = [], []
             if update:
-                logger.debug("[%s] Saving changes", list(update))
+                self.logger.debug("[%s] Saving changes", list(update))
                 diags = {}
                 for d in update:
                     diags[d.diagnostic] = d
@@ -386,7 +429,7 @@ class DiagnosticHub(object):
                     [orjson.dumps(diags, default=json_default).decode("utf-8"), oid],
                 )
             if remove:
-                logger.debug("[%s] Removed diagnostics", list(remove))
+                self.logger.debug("[%s] Removed diagnostics", list(remove))
                 removed_labels += [
                     f"{DIAGNOCSTIC_LABEL_SCOPE}::{d}::{s}" for d, s in product(remove, states)
                 ]
@@ -415,7 +458,9 @@ class DiagnosticHub(object):
         :return:
         """
         from noc.core.service.loader import get_service
-
+        if not self.sync_alarm:
+            self.logger.debug("Synchronize alarm is disabled")
+            return
         now = datetime.datetime.now()
         # Group Alarms
         groups = {}
@@ -425,7 +470,8 @@ class DiagnosticHub(object):
         messages: List[Dict[str, Any]] = []  # Messages for send dispose
         processed = set()
         diagnostics = set(diagnostics or [])
-        for d_name, d in self.__diagnostics.items():
+        for d in self:
+            d_name = d.diagnostic
             dc = d.config
             if not dc.alarm_class:
                 continue
@@ -492,7 +538,7 @@ class DiagnosticHub(object):
                 continue
             messages += [alarms[d]]
         if self.dry_run:
-            logger.info("Sync Diagnostic Alarm: %s", messages)
+            self.logger.info("Sync Diagnostic Alarm: %s", messages)
             return
         # Send Dispose
         svc = get_service()
@@ -533,7 +579,7 @@ class DiagnosticHub(object):
         from noc.core.mx import MX_LABELS, MX_H_VALUE_SPLITTER, DEFAULT_ENCODING
 
         if self.dry_run:
-            logger.info(
+            self.logger.info(
                 "[%s] Register change: %s -> %s",
                 diagnostic,
                 state,
