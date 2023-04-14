@@ -67,6 +67,7 @@ class DiagnosticCheck(DiscoveryCheck):
             self.object,
             sync_alarm=self.job.can_update_alarms(),
             sync_labels=config.discovery.sync_diagnostic_labels,
+            logger=self.logger,
         ) as dhub:
             for d in dhub:
                 dc = d.config

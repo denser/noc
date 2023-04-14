@@ -25,7 +25,6 @@ from noc.core.ioloop.util import run_sync
 from noc.config import config
 from noc.models import is_document
 
-logger = logging.getLogger(__name__)
 
 EVENT_TRANSITION = {
     "disable": {"unknown": "blocked", "enabled": "blocked", "failed": "blocked"},
@@ -174,9 +173,14 @@ class DiagnosticHub(object):
     """
 
     def __init__(
-        self, o: Any, dry_run: bool = False, sync_alarm: bool = True, sync_labels: bool = True
+        self,
+        o: Any,
+        dry_run: bool = False,
+        sync_alarm: bool = True,
+        sync_labels: bool = True,
+        logger=None,
     ):
-        self.logger = logging.getLogger(__name__)
+        self.logger = logger or logging.getLogger(__name__)
         self.__diagnostics: Optional[Dict[str, DiagnosticItem]] = None
         self.__checks: Dict[Check, List[str]] = defaultdict(list)
         self.__depended: Dict[str, str] = {}
@@ -279,7 +283,6 @@ class DiagnosticHub(object):
         :param reason: Reason state changed
         :param changed_ts: Timestamp changed
         :param data: Collected checks data
-        :param bulk: Return changed diagnostic without saved
         :return:
         """
         d = self[diagnostic]
@@ -561,7 +564,7 @@ class DiagnosticHub(object):
                 stream=stream,
                 partition=partition,
             )
-            logger.debug(
+            self.logger.debug(
                 "Dispose: %s", orjson.dumps(msg, option=orjson.OPT_INDENT_2).decode("utf-8")
             )
 
