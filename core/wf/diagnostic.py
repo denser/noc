@@ -11,6 +11,7 @@ import datetime
 import logging
 from dataclasses import dataclass
 from collections import defaultdict
+from functools import partial
 from itertools import product
 from typing import Optional, List, Dict, Any, Iterable
 
@@ -20,6 +21,7 @@ from pydantic import BaseModel, PrivateAttr
 
 # NOC modules
 from noc.core.checkers.base import Check, CheckData
+from noc.core.ioloop.util import run_sync
 from noc.config import config
 from noc.models import is_document
 
@@ -35,8 +37,8 @@ EVENT_TRANSITION = {
 
 # BuiltIn Diagnostics
 SA_DIAG = "SA"
-EVENT_DIAG = "PROC_EVENT"
-ALARM_DIAG = "PROC_ALARM"
+EVENT_DIAG = "FM_EVENT"
+ALARM_DIAG = "FM_ALARM"
 TT_DIAG = "TT"
 #
 SNMP_DIAG = "SNMP"
@@ -88,6 +90,7 @@ class DiagnosticState(str, enum.Enum):
 class DiagnosticConfig(object):
     diagnostic: str
     blocked: bool = False  # Block by config
+    default_state: DiagnosticState = DiagnosticState.unknown  # Default DiagnosticState
     # Check config
     checks: Optional[List[Check]] = None  # CheckItem name, param
     dependent: Optional[List[str]] = None  # Dependency diagnostic
@@ -142,6 +145,12 @@ class DiagnosticItem(BaseModel):
     def config(self):
         return self._config
 
+    def reset(self):
+        self.state = self.config.default_state
+        self.checks = []
+        self.reason = "Reset by"
+        self.changed = datetime.datetime.now()
+
 
 class DiagnosticHub(object):
     """
@@ -164,7 +173,9 @@ class DiagnosticHub(object):
 
     """
 
-    def __init__(self, o: Any, dry_run: bool = False, sync_alarm: bool = True):
+    def __init__(
+        self, o: Any, dry_run: bool = False, sync_alarm: bool = True, sync_labels: bool = True
+    ):
         self.logger = logging.getLogger(__name__)
         self.__diagnostics: Optional[Dict[str, DiagnosticItem]] = None
         self.__checks: Dict[Check, List[str]] = defaultdict(list)
@@ -174,6 +185,7 @@ class DiagnosticHub(object):
         self.__object = o
         self.dry_run: bool = dry_run  # For test do not DB Sync
         self.sync_alarm = sync_alarm
+        self.sync_labels = sync_labels
         self.bulk_mode: bool = False
         # diagnostic state
 
@@ -236,15 +248,16 @@ class DiagnosticHub(object):
         if is_document(self.__object):
             return r
         for dc in self.__object.iter_diagnostic_configs():
-            # if dc.diagnostic in self.__object.diagnostics:
-            #     r[dc.diagnostic] = self.__object.diagnostics[dc.diagnostic]
             item = self.__object.diagnostics.get(dc.diagnostic) or {}
             if not item:
-                item = {"diagnostic": dc.diagnostic}
+                item = {"diagnostic": dc.diagnostic, "state": dc.default_state.value}
+            elif item["state"] == "blocked" and not dc.blocked:
+                item["state"] = dc.default_state.value
             if dc.blocked:
                 item["state"] = "blocked"
             item["config"] = dc
             r[dc.diagnostic] = DiagnosticItem(**item)
+            item.pop("config")
             for c in dc.checks or []:
                 self.__checks[c] += [dc.diagnostic]
             for dd in dc.dependent or []:
@@ -258,7 +271,6 @@ class DiagnosticHub(object):
         reason: Optional[str] = None,
         changed_ts: Optional[datetime.datetime] = None,
         data: Optional[Dict[str, Any]] = None,
-        bulk: Optional[List[Any]] = None,
     ):
         """
         Set diagnostic ok/fail state
@@ -340,13 +352,14 @@ class DiagnosticHub(object):
 
     def reset_diagnostics(self, diagnostics: List[str]):
         """
-        Remove diagnostic data.
-        * reset alarm
-        * update data in
+        Reset diagnostic data.
+        * update config for resetting diagnostic
+        * syncronize diagnostics config
         """
+        self.logger.info("[%s] Reset diagnostics: %s", str(self.__object), diagnostics)
         for d in diagnostics:
             if d in self:
-                del self.__diagnostics[d]
+                self[d].reset()
         self.sync_diagnostics()
 
     def sync_diagnostics(self):
@@ -398,8 +411,6 @@ class DiagnosticHub(object):
         """
         from django.db import connection as pg_connection
 
-        # from noc.main.models.label import Label
-
         if self.dry_run:
             return
         if is_document(self.__object):
@@ -440,13 +451,16 @@ class DiagnosticHub(object):
                      WHERE id = %s""",
                     ["{%s}" % r for r in remove] + [oid],
                 )
-            # if sync_labels and (add_labels or removed_labels):
-            #     Label._change_model_labels(
-            #         "sa.ManagedObject",
-            #         add_labels=add_labels or None,
-            #         remove_labels=removed_labels or None,
-            #         instance_filters=[("id", oid)],
-            #     )
+            sync_labels = sync_labels or self.sync_labels
+            if sync_labels and (add_labels or removed_labels):
+                from noc.main.models.label import Label
+
+                Label._change_model_labels(
+                    "sa.ManagedObject",
+                    add_labels=add_labels or None,
+                    remove_labels=removed_labels or None,
+                    instance_filters=[("id", oid)],
+                )
         self.__object._reset_caches(oid)
 
     def sync_alarms(self, diagnostics: Optional[List[str]] = None):
@@ -459,9 +473,6 @@ class DiagnosticHub(object):
         """
         from noc.core.service.loader import get_service
 
-        if not self.sync_alarm:
-            self.logger.debug("Synchronize alarm is disabled")
-            return
         now = datetime.datetime.now()
         # Group Alarms
         groups = {}
@@ -494,10 +505,10 @@ class DiagnosticHub(object):
                     if d_name not in self:
                         continue
                     dd = self[d_name]
-                    if dd and dd.state == DiagnosticState.failed:
+                    if dd and dd.state == DiagnosticState.failed and self.sync_alarm:
                         groups[dc.diagnostic] += [{"diagnostic": d_name, "reason": dd.reason or ""}]
                     processed.add(d_name)
-            elif d and d.state == d.state.failed:
+            elif d and d.state == d.state.failed and self.sync_alarm:
                 alarms[dc.diagnostic] = {
                     "timestamp": now,
                     "reference": f"dc:{self.__object.id}:{d.diagnostic}",
@@ -595,7 +606,7 @@ class DiagnosticHub(object):
         dd = {
             "date": now.date().isoformat(),
             "ts": now.replace(microsecond=0).isoformat(sep=" "),
-            "managed_object": self.bi_id,
+            "managed_object": self.__object.bi_id,
             "diagnostic_name": diagnostic,
             "state": state,
             "from_state": from_state,
@@ -604,24 +615,27 @@ class DiagnosticHub(object):
             dd["reason"] = reason
         if data:
             dd["data"] = orjson.dumps(data).decode(DEFAULT_ENCODING)
-        svc.register_metrics("diagnostichistory", [dd], key=self.bi_id)
+        svc.register_metrics("diagnostichistory", [dd], key=self.__object.bi_id)
         # Send Stream
         # ? always send (from policy)
         if config.message.enable_diagnostic_change:
-            svc.send_message(
-                data={
-                    "name": diagnostic,
-                    "state": state,
-                    "from_state": from_state,
-                    "reason": reason,
-                    "managed_object": self.get_message_context(),
-                },
-                message_type="diagnostic_change",
-                headers={
-                    MX_LABELS: MX_H_VALUE_SPLITTER.join(self.__object.effective_labels).encode(
-                        encoding=DEFAULT_ENCODING
-                    ),
-                },
+            run_sync(
+                partial(
+                    svc.send_message,
+                    {
+                        "name": diagnostic,
+                        "state": state,
+                        "from_state": from_state,
+                        "reason": reason,
+                        "managed_object": self.get_message_context(),
+                    },
+                    "diagnostic_change",
+                    {
+                        MX_LABELS: MX_H_VALUE_SPLITTER.join(self.__object.effective_labels).encode(
+                            encoding=DEFAULT_ENCODING
+                        ),
+                    },
+                )
             )
         # Send Notification
 

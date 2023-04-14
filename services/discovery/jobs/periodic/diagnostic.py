@@ -28,6 +28,7 @@ from noc.core.wf.diagnostic import DiagnosticState, DiagnosticHub
 from noc.core.debug import error_report
 from noc.sa.models.profile import Profile
 from noc.pm.models.metrictype import MetricType
+from noc.config import config
 
 
 class DiagnosticCheck(DiscoveryCheck):
@@ -62,7 +63,11 @@ class DiagnosticCheck(DiscoveryCheck):
         # Diagnostic Data
         d_data: Dict[str, Any] = defaultdict(dict)  # Diagnostic -> Data
         # Processed Check ? Filter param
-        with DiagnosticHub(self.object, sync_alarm=self.job.can_update_alarms()) as dhub:
+        with DiagnosticHub(
+            self.object,
+            sync_alarm=self.job.can_update_alarms(),
+            sync_labels=config.discovery.sync_diagnostic_labels,
+        ) as dhub:
             for d in dhub:
                 dc = d.config
                 # Check on Discovery run

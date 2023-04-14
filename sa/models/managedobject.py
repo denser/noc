@@ -224,7 +224,11 @@ class ManagedObjectManager(Manager):
             .get_queryset()
             .annotate(
                 is_managed=Case(
-                    When(Q(effective_labels__contains=["noc::is_managed::="]), then=Value(True)),
+                    When(
+                        Q(effective_labels__contains=["noc::is_managed::="])
+                        | Q(diagnostics__SA__state="enabled"),
+                        then=Value(True),
+                    ),
                     default=Value(False),
                     output_field=BooleanField(),
                 ),
@@ -763,8 +767,6 @@ class ManagedObject(NOCModel):
         "user",
         "password",
         "super_password",
-        "snmp_ro",
-        "snmp_rw",
         "access_preference",
         "cli_privilege_policy",
     }
@@ -983,6 +985,8 @@ class ManagedObject(NOCModel):
         if (
             self.initial_data["id"] is None
             or self._access_fields.intersection(set(self.changed_fields))
+            or "snmp_ro" in self.changed_fields
+            or "snmp_rw" in self.changed_fields
             or "profile" in self.changed_fields
             or "vendor" in self.changed_fields
             or "platform" in self.changed_fields
@@ -1002,7 +1006,7 @@ class ManagedObject(NOCModel):
             or "snmp_rw" in self.changed_fields
             or "address" in self.changed_fields
         ):
-            diagnostics += ["SNMP"]
+            diagnostics += ["SNMP", "Access"]
         # Rebuild paths
         if (
             self.initial_data["id"] is None
@@ -1056,7 +1060,7 @@ class ManagedObject(NOCModel):
             for ll in Link.object_links(self):
                 ll.save()
         # Handle became unmanaged
-        if "ALARM" not in self.interactions:
+        if Interaction.Alarm not in self.interactions:
             # Clear alarms
             from noc.fm.models.activealarm import ActiveAlarm
 
@@ -1073,8 +1077,6 @@ class ManagedObject(NOCModel):
         if diagnostics:
             # Reset changed diagnostic
             self.diagnostic.reset_diagnostics(diagnostics)
-            # Update complex diagnostics
-            self.diagnostic.refresh_diagnostics()
 
     def on_delete(self):
         self._reset_caches(self.id, credential=True)
@@ -2400,6 +2402,7 @@ class ManagedObject(NOCModel):
             SA_DIAG,
             display_description="ServiceActivation. Allow active device interaction",
             blocked=Interaction.ServiceActivation not in self.interactions,
+            default_state=DiagnosticState.enabled,
             run_policy="D",
             reason="Deny by Allowed interaction by State"
             if Interaction.ServiceActivation not in self.interactions
@@ -2409,6 +2412,7 @@ class ManagedObject(NOCModel):
             ALARM_DIAG,
             display_description="FaultManagement. Allow Raise Alarm on device",
             blocked=Interaction.Alarm not in self.interactions,
+            default_state=DiagnosticState.enabled,
             run_policy="D",
             reason="Deny by Allowed interaction by State"
             if Interaction.Alarm not in self.interactions
@@ -2471,13 +2475,13 @@ class ManagedObject(NOCModel):
                 run_order="S",
                 reason=None,
             )
-            # Access Diagnostic (Blocked - block SNMP & CLI Check ?
-            yield DiagnosticConfig(
-                "Access",
-                dependent=["SNMP", "CLI", "HTTP"],
-                show_in_display=False,
-                alarm_class="NOC | Managed Object | Access Degraded",
-            )
+        # Access Diagnostic (Blocked - block SNMP & CLI Check ?
+        yield DiagnosticConfig(
+            "Access",
+            dependent=["SNMP", "CLI", "HTTP"],
+            show_in_display=False,
+            alarm_class="NOC | Managed Object | Access Degraded",
+        )
         if Interaction.Event in self.interactions:
             fm_policy = self.get_event_processing_policy()
             reason = ""
