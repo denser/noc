@@ -259,6 +259,18 @@ class Config(BaseConfig):
             default=10,
             help="TTL for object status cache. Used when check run discovery",
         )
+        ignored_chassis_macs = ListParameter(
+            item=StringParameter(),
+            default=[
+                "00:00:00:00:00:00",  # Empty MAC
+                "01:01:01:01:01:01",
+                "00:01:02:03:04:00",  # Very Smart programmer
+                "00:01:02:03:04:05",  # Very Smart+ programmer
+                "05:04:03:02:01:00",
+                "00:02:03:04:05:06",  # Ubiquity Programmers
+                "FF:FF:FF:FF:FF:FF",
+            ],
+        )
 
     class dns(ConfigSection):
         warn_before_expired = SecondsParameter(default="30d")
@@ -342,18 +354,6 @@ class Config(BaseConfig):
         admin_user_name = StringParameter(default="admin")
         admin_password = StringParameter(default="admin")
         admin_email = StringParameter(default="test@example.com")
-
-    class inv(ConfigSection):
-        ignored_chassis_macs = ListParameter(
-            item=StringParameter(),
-            default=[
-                "FF:FF:FF:FF:FF:FF",
-                "00:00:00:00:00",
-                "01:01:01:01:01",
-                "01:02:03:04:05",
-                "05:04:03:02:01",
-            ],
-        )
 
     installation_name = StringParameter(default="Unconfigured installation")
     installation_id = UUIDParameter(default="")
